@@ -17,36 +17,61 @@
   </style>
 </head>
 <body>
-  <div class="card">
+<div class="card">
     <div class="logo">Secure Pay</div>
     <div id="biz-name">Loading...</div>
-    
     <label id="file-label" for="file-input">Select Screenshot</label>
     <input type="file" id="file-input" accept="image/*">
     
-    <img id="preview">
-    <div id="status">Upload proof of transfer to continue</div>
-  </div>
+    <img id="preview" style="display:none; width:100%; border-radius:12px; margin-top:15px;">
+    <button id="upload-btn" style="display:none; width:100%; padding:15px; background:#28a745; color:white; border:none; border-radius:16px; font-weight:700; margin-top:15px; cursor:pointer;">
+      Confirm & Send Receipt
+    </button>
+    
+    <div id="status" style="margin-top:15px;">Upload proof of transfer to continue</div>
+</div>
 
-  <script>
-    // --- 1. 配置：修改为你的 Worker 域名 ---
-    const worker_endpoint = "https://order-notifier.risstrument.workers.dev/api/upload-temp";
+<script>
+    // --- 1. 定期清理旧的 LocalStorage (24小时) ---
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('up_ok_')) {
+        const timestamp = parseInt(key.split('_')[2]);
+        if (Date.now() - timestamp > 86400000) {
+          localStorage.removeItem(key);
+        }
+      }
+    }
 
-    // --- 2. 获取 URL 参数 ---
     const urlParams = new URLSearchParams(window.location.search);
     const tempId = urlParams.get('temp_id');
     const biz = urlParams.get('biz') || "SYSTEM";
+    const worker_endpoint = "https://order-notifier.risstrument.workers.dev/api/upload-temp";
 
-    // 更新 UI 上的商家名称
     document.getElementById('biz-name').innerText = biz + " Secure Upload";
 
     const fileInput = document.getElementById('file-input');
     const status = document.getElementById('status');
     const preview = document.getElementById('preview');
+    const uploadBtn = document.getElementById('upload-btn');
+    const fileLabel = document.getElementById('file-label');
 
-    // --- 3. 压缩图片逻辑 ---
-    async function compressImage(file, maxWidth = 1200, quality = 0.7) {
-      return new Promise((resolve, reject) => {
+    let currentFileBlob = null; // 存储压缩后的文件
+
+    // --- 2. 检查状态 ---
+    function isAlreadyDone() {
+      if (!tempId) return false;
+      return !!localStorage.getItem(`up_ok_${tempId}`);
+    }
+
+    if (isAlreadyDone()) {
+      fileLabel.style.display = 'none';
+      status.innerHTML = "✅ <b style='color:#28a745'>Submitted</b><br>Receipt already sent for this session.";
+    }
+
+    // --- 3. 压缩函数 ---
+    async function compressImage(file) {
+      return new Promise((resolve) => {
         const reader = new FileReader();
         reader.readAsDataURL(file);
         reader.onload = e => {
@@ -54,65 +79,64 @@
           img.src = e.target.result;
           img.onload = () => {
             const canvas = document.createElement('canvas');
-            let width = img.width;
-            let height = img.height;
+            const maxWidth = 1200;
+            let { width, height } = img;
             if (width > maxWidth) {
               height = Math.round((maxWidth / width) * height);
               width = maxWidth;
             }
             canvas.width = width;
             canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, width, height);
-            canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality);
+            canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+            canvas.toBlob(b => resolve(b), 'image/jpeg', 0.7);
           };
         };
       });
     }
 
-    // --- 4. 监听文件选择 ---
+    // --- 4. 选择文件逻辑 ---
     fileInput.onchange = async () => {
-      const originalFile = fileInput.files[0];
-      if (!originalFile || !tempId) {
-        status.innerText = "❌ Missing Session ID or File";
-        return;
-      }
+      const file = fileInput.files[0];
+      if (!file || !tempId) return;
 
-      fileInput.disabled = true;
-      status.innerHTML = "<span style='color:#007bff'>🌀 Processing...</span>";
+      status.innerHTML = "🌀 Processing...";
+      currentFileBlob = await compressImage(file);
+      
+      preview.src = URL.createObjectURL(currentFileBlob);
+      preview.style.display = 'block';
+      uploadBtn.style.display = 'block';
+      fileLabel.innerText = "Change Photo";
+      status.innerHTML = "☝️ <b>Check the photo</b>, then click confirm.";
+    };
+
+    // --- 5. 确认上传逻辑 ---
+    uploadBtn.onclick = async () => {
+      if (!currentFileBlob || !tempId) return;
+
+      uploadBtn.disabled = true;
+      uploadBtn.style.opacity = "0.6";
+      status.innerHTML = "🚀 Uploading...";
+
+      const formData = new FormData();
+      formData.append('file', currentFileBlob, 'receipt.jpg');
+      formData.append('temp_id', tempId);
+      formData.append('biz', biz);
 
       try {
-        const compressedBlob = await compressImage(originalFile);
-        preview.src = URL.createObjectURL(compressedBlob);
-        preview.style.display = 'block';
-        status.innerHTML = "<span style='color:#007bff'>🚀 Uploading...</span>";
-
-        const formData = new FormData();
-        formData.append('file', compressedBlob, 'receipt.jpg');
-        formData.append('temp_id', tempId);
-        formData.append('biz', biz);
-
-        // 发送到 Worker API
-        const res = await fetch(worker_endpoint, { 
-            method: 'POST', 
-            body: formData,
-            // 确保跨域
-            mode: 'cors' 
-        });
-
+        const res = await fetch(worker_endpoint, { method: 'POST', body: formData, mode: 'cors' });
         if (res.ok) {
-          document.getElementById('file-label').style.display = 'none';
-          status.innerHTML = "✅ <b style='color:#28a745'>Upload Success!</b><br>You can now return to your computer to complete the checkout.";
-          if (navigator.vibrate) navigator.vibrate(200); 
-        } else {
-          throw new Error("Server rejected upload");
-        }
+          localStorage.setItem(`up_ok_${tempId}`, Date.now());
+          fileLabel.style.display = 'none';
+          uploadBtn.style.display = 'none';
+          status.innerHTML = "✅ <b style='color:#28a745'>Upload Success!</b><br>You can now finish on your computer.";
+          if (navigator.vibrate) navigator.vibrate(200);
+        } else { throw new Error(); }
       } catch (e) {
-        console.error(e);
-        status.innerHTML = "<span style='color:#dc3545'>❌ Upload Failed</span><br>Please try again or use desktop upload.";
-        fileInput.disabled = false;
+        status.innerHTML = "<span style='color:#dc3545'>❌ Failed. Try again.</span>";
+        uploadBtn.disabled = false;
+        uploadBtn.style.opacity = "1";
       }
     };
-  </script>
+</script>
 </body>
 </html>
